@@ -174,7 +174,7 @@ def ablate_feature_direction(model, dataset, cache_name, max_seq_length, autoenc
 
 
     if(setting == "sentences"):
-        dataset = torch.stack(dataset)
+        # dataset = torch.stack(dataset)
         logit_diffs = torch.zeros_like(dataset)
         with torch.no_grad():
             dataset = dataset.to(device)
@@ -502,3 +502,126 @@ def get_token_statistics(feature, feature_activation, dataset, tokenizer, max_se
     plt.savefig(f'{save_location}feature_{feature}_{save_name}_combined.png', bbox_inches='tight')
 
     return
+
+from task_patching_utils import SparseAct
+import torch as t
+from collections import namedtuple
+EffectOut = namedtuple('EffectOut', ['effects', 'deltas', 'grads', 'total_effect'])
+index_of_chosen_rejection_difference = torch.load("rm_save_files/index_of_chosen_rejection_difference.pt")
+
+# from torchtyping import TensorType
+def patching_effect_two(
+        clean,
+        patch,
+        model,
+        submodules,
+        dictionaries,
+        metric_fn,
+        tracer_kwargs,
+        positions,
+        steps=10,
+        metric_kwargs=dict(),
+):
+
+    # first run through a test input to figure out which hidden states are tuples
+    is_tuple = {}
+    with model.trace("_"):
+        for submodule in submodules:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
+
+    hidden_states_clean = {}
+    with model.trace(clean, **tracer_kwargs), t.no_grad():
+        for submodule in submodules:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            f = dictionary.encode(x)
+            x_hat = dictionary.decode(f)
+            residual = x - x_hat
+            hidden_states_clean[submodule] = SparseAct(act=f.save(), res=residual.save())
+        metric_clean = metric_fn(model, **metric_kwargs).save()
+        # metric_clean = model.output.logits[:, 0].save()
+        # metric_clean = model.score.output.save()
+    hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
+    # print("metric clean reward: -5.6 or 0.6: ",metric_clean)
+
+    if patch is None:
+        # print(f"hidden state clean: {hidden_states_clean[submodule]}")
+        v = hidden_states_clean[submodule]
+        # print(v)
+        v_act = v.act.clone()
+        v_res = v.res.clone()
+        # print(f"v_act shape: {v_act}")
+        # print(f"v_res shape: {v_res.shape}")
+        for pos_ind, pos in enumerate(positions):
+            v_act[pos_ind, pos:] = 0
+            v_res[pos_ind, pos:] = 0
+        hidden_states_patch = {
+            # k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
+            k : SparseAct(act=v_act, res=v_res) for k, v in hidden_states_clean.items()
+        }
+        total_effect = None
+    else:
+        hidden_states_patch = {}
+        with model.trace(patch, **tracer_kwargs), t.no_grad():
+            for submodule in submodules:
+                dictionary = dictionaries[submodule]
+                x = submodule.output
+                if is_tuple[submodule]:
+                    x = x[0]
+                f = dictionary.encode(x)
+                x_hat = dictionary.decode(f)
+                residual = x - x_hat
+                hidden_states_patch[submodule] = SparseAct(act=f.save(), res=residual.save())
+            metric_patch = metric_fn(model, **metric_kwargs).save()
+        total_effect = (metric_patch.value - metric_clean.value).detach()
+        hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
+
+    effects = {}
+    deltas = {}
+    grads = {}
+    for submodule in submodules:
+        dictionary = dictionaries[submodule]
+        clean_state = hidden_states_clean[submodule]
+        patch_state = hidden_states_patch[submodule]
+        with model.trace(**tracer_kwargs) as tracer:
+            metrics = []
+            fs = []
+            for step in range(steps):
+                alpha = step / steps
+                f = (1 - alpha) * clean_state + alpha * patch_state
+                f.act.retain_grad()
+                f.res.retain_grad()
+                fs.append(f)
+                with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+                    if is_tuple[submodule]:
+                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                    else:
+                        submodule.output = dictionary.decode(f.act) + f.res
+                    # output_t = metric_fn(model, **metric_kwargs).save()
+                    metrics.append(metric_fn(model, **metric_kwargs))
+
+            metric = sum([m for m in metrics])
+            mm = [m.detach().cpu().save() for m in metrics]
+            metric.sum().backward(retain_graph=True)
+
+
+        # print("Metrics", output_t)
+        # print("metric ", mm)
+        mean_grad = sum([f.act.grad for f in fs]) / steps
+        mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+        print('Out-Out next loop Memory Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
+
+        grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+        delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
+        # return grad, delta
+        effect = grad @ delta
+
+        # effects[submodule] = effect.detach().cpu()
+        # deltas[submodule] = delta.detach().cpu()
+        # grads[submodule] = grad.detach().cpu()
+        # effects[submodule] = effect.act.detach().cpu()
+        # deltas[submodule] = delta.act.detach().cpu()
+        # grads[submodule] = grad.act.detach().cpu()
+    return effect.act.detach().cpu()
