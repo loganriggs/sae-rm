@@ -611,7 +611,7 @@ def patching_effect_two(
         # print("metric ", mm)
         mean_grad = sum([f.act.grad for f in fs]) / steps
         mean_residual_grad = sum([f.res.grad for f in fs]) / steps
-        print('Out-Out next loop Memory Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
+        # print('Out-Out next loop Memory Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
 
         grad = SparseAct(act=mean_grad, res=mean_residual_grad)
         delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
