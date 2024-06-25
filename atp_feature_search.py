@@ -23,10 +23,10 @@ from huggingface_hub import hf_hub_download
 from dictionary import GatedAutoEncoder
 
 parser = argparse.ArgumentParser(description="Run script with specified parameters")
-parser.add_argument('--layer', type=int, default=12, help='Layer number to use (default: 8)')
-parser.add_argument('--total_num_of_datapoints', type=int, default=10, help='Total number of datapoints (default: 10)')
+parser.add_argument('--layer', type=int, default=12, help='Layer number to use (default: 12)')
+parser.add_argument('--total_num_of_datapoints', type=int, default=500, help='Total number of datapoints (default: 2000)')
 parser.add_argument('--batch_size', type=int, default=3, help='Batch size (default: 3)')
-parser.add_argument('--token_length_cutoff', type=int, default=500, help='Token length cutoff (default: 300)')
+parser.add_argument('--token_length_cutoff', type=int, default=500, help='Token length cutoff (default: 500)')
 args = parser.parse_args()
 
 # Use the parsed values directly
@@ -149,8 +149,11 @@ torch.cuda.empty_cache()
 print('Original Memory Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
 
 num_features = sae.encoder.weight.shape[0]
-num_datapoints = len(hh)*2
-all_effects_per_feature = torch.zeros((num_datapoints, num_features))
+num_datapoints = len(hh)
+all_effects_per_feature_accepted = torch.zeros((num_datapoints, num_features))
+all_effects_per_feature_rejected = torch.zeros((num_datapoints, num_features))
+
+effects_list = [all_effects_per_feature_accepted, all_effects_per_feature_rejected]
 
 batch_size = hh_dl.batch_size
 for batch_ind, batch in enumerate(tqdm(hh_dl)):
@@ -177,10 +180,11 @@ for batch_ind, batch in enumerate(tqdm(hh_dl)):
 
         # set the values before the divergence point to 0
         # Compute the starting index for the current batch and text
-        start_index = batch_ind * batch_size * 2 + text_ind * batch_size
-        end_index = start_index + batch_size
+        # start_index = batch_ind * batch_size * 2 + text_ind * batch_size
+        # end_index = start_index + batch_size
+        effects_list[text_ind][batch_loc:batch_loc+batch_size] = effects.sum(1)
         
-        all_effects_per_feature[start_index:end_index] = effects.sum(1)
+        # all_effects_per_feature[start_index:end_index] = effects.sum(1)
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -188,4 +192,6 @@ for batch_ind, batch in enumerate(tqdm(hh_dl)):
 # make sae_file_dir if it doesn't exist
 if not os.path.exists(sae_file_dir):
     os.makedirs(sae_file_dir)
-torch.save(all_effects_per_feature, f"{sae_file_dir}/all_effects_per_feature_token_{token_length_cutoff}_top_{total_num_of_datapoints}.pt")
+# torch.save(all_effects_per_feature, f"{sae_file_dir}/all_effects_per_feature_token_{token_length_cutoff}_top_{total_num_of_datapoints}.pt")
+torch.save(all_effects_per_feature_accepted, f"{sae_file_dir}/all_effects_per_feature_accepted_token_{token_length_cutoff}_top_{total_num_of_datapoints}.pt")
+torch.save(all_effects_per_feature_rejected, f"{sae_file_dir}/all_effects_per_feature_rejected_token_{token_length_cutoff}_top_{total_num_of_datapoints}.pt")
