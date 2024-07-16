@@ -265,7 +265,7 @@ def convert_token_array_to_list(array):
             array = [array]
     return array
 
-def tokens_and_activations_to_html(toks, activations, tokenizer, logit_diffs=None, model_type="causal"):
+def tokens_and_activations_to_html(toks, activations, tokenizer, logit_diffs=None, model_type="causal", text_above_each_act=None):
     # text_spacing = "0.07em"
     text_spacing = "0.00em"
     toks = convert_token_array_to_list(toks)
@@ -292,6 +292,8 @@ def tokens_and_activations_to_html(toks, activations, tokenizer, logit_diffs=Non
     
     highlighted_text.append('<div style="margin-top: 0.5em;"></div>')
     for seq_ind, (act, tok) in enumerate(zip(activations, toks)):
+        if(text_above_each_act is not None):
+            highlighted_text.append(f'<span>{text_above_each_act[seq_ind]}</span>')
         for act_ind, (a, t) in enumerate(zip(act, tok)):
             if(logit_diffs is not None and model_type != "reward_model"):
                 highlighted_text.append('<div style="display: inline-block;">')
@@ -311,16 +313,21 @@ def tokens_and_activations_to_html(toks, activations, tokenizer, logit_diffs=Non
     highlighted_text = ''.join(highlighted_text)
     return highlighted_text
 
-def get_autoencoder_activation(model, cache_name, tokens, autoencoder):
+def get_autoencoder_activation(model, cache_name, tokens, autoencoder,  return_output=False):
     device = model.device
     with Trace(model, cache_name) as ret, torch.no_grad():
-        _ = model(tokens.to(device))
+        if return_output:
+            logits = model(tokens.to(device)).logits
+        else:
+            _ = model(tokens.to(device))
         internal_activations = ret.output
         # check if instance tuple
         if(isinstance(internal_activations, tuple)):
             internal_activations = internal_activations[0]
     internal_activations = rearrange(internal_activations, "b s n -> (b s) n" )
     autoencoder_activations = autoencoder.encode(internal_activations)
+    if return_output:
+        return autoencoder_activations, logits
     return autoencoder_activations
 
 def ablate_context_one_token_at_a_time(model, dataset, cache_name, autoencoder, feature, max_ablation_length=20):
